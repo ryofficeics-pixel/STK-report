@@ -40,7 +40,168 @@ const KEY="ics-daily-report-v1";
 const APP_VERSION="2026.05.20.project-sync-human-ui";
 const HOME_URL=location.pathname.includes("/tools/")?"../../index.html":"./index.html";
 const DEFAULT_LOGO_URL="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAA+gAAAEMCAYAAABX6ZxZAAEAAElEQVR42uydd3gUVffHz7kzu2mEJCT0LkUBKRIEFHRDURREUNlgQcRXARFBFF5s+G5WRfHFFxULEFTEArqLgIAKSslKL6En9E4oSU[...]
-
+let db={appVersion:APP_VERSION,projects:[],surveys:[],dailyReports:[],weeklyReports:[]};
+let route="daily",activeProjectId="",activeSurveyId="",editingDailyId="",previewDailyId="",previewWeeklyId="",activeDate=today(),autosaveTimer=null,lastSavedText="Belum ada perubahan";
+const blobUrlCache=new Map(),pdfRenderJobs=new Set();
+const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>Array.from(r.querySelectorAll(s));
+const uid=p=>`${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,8)}`;
+const esc=v=>String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;");
+function today(){return new Date().toISOString().slice(0,10)}
+function fmtDate(v){if(!v)return"-";try{const d=new Date(`${v}T00:00:00`);if(isNaN(d.getTime()))return"-";return new Intl.DateTimeFormat("id-ID",{dateStyle:"medium"}).format(d)}catch(e){return"-"}}
+function fmtDateTime(v){if(!v)return"-";try{const d=new Date(v);if(isNaN(d.getTime()))return"-";return new Intl.DateTimeFormat("id-ID",{dateStyle:"short",timeStyle:"short"}).format(d)}catch(e){return"[...]
+function cleanFile(v){return String(v||"Project").replace(/[\\/:*?"<>|]/g," ").replace(/\s+/g," ").trim()}
+function compactDateTime(v){const d=new Date(v||new Date()),p=n=>String(n).padStart(2,"0");return `${p(d.getDate())}/${p(d.getMonth()+1)}/${String(d.getFullYear()).slice(-2)} ${p(d.getHours())}:${p(d.[...]
+function trim(v,n=120){const s=String(v||"");return s.length>n?s.slice(0,n-3).trim()+"...":s}
+function startOfWeek(v){const d=new Date(`${v||today()}T00:00:00`);const day=d.getDay()||7;d.setDate(d.getDate()-day+1);return d.toISOString().slice(0,10)}
+function addDays(v,n){const d=new Date(`${v||today()}T00:00:00`);d.setDate(d.getDate()+n);return d.toISOString().slice(0,10)}
+function normalizeText(v){return String(v||"").trim().toLowerCase().replace(/\s+/g," ")}
+function normalizeProjectKey(project){return [project?.name||project?.projectName,project?.location||project?.projectLocation,project?.owner||project?.clientOrOwner||project?.ownerName].map(normalizeT[...]
+function findExistingProject(projectCandidate){const key=normalizeProjectKey(projectCandidate);return db.projects.find(p=>normalizeProjectKey(p)===key)||db.projects.find(p=>normalizeText(p.name)===nor[...]
+function statusLabel(v){return ({survey_only:"Survey saja",project_registered:"Proyek terdaftar di database",added_to_daily_progress:"Proyek sudah terdaftar",converted_to_daily:"Proyek sudah terdaftar[...]
+function normalizeProjectRecord(p){return {...p,id:p.id||p.projectId||uid("project"),name:p.name||p.projectName||"Proyek tanpa nama",location:p.location||p.projectLocation||"",owner:p.owner||p.clientO[...]
+function ensureProjectFromSurvey(surveyData){const candidate={name:surveyData.title||surveyData.projectNameSnapshot||"Proyek dari Survey",location:surveyData.location||surveyData.title||"",owner:surve[...]
+function linkSurveyToProject(surveyId,projectId){const s=getSurveyById(surveyId),p=getProjectById(projectId);if(!s||!p)return false;s.linkedProjectId=p.id;s.status=s.linkedDailyReportId?"added_to_dail[...]
+function activateProjectForDailyProgress(projectId,surveyId=null){const p=getProjectById(projectId);if(!p)return false;p.status="active_daily_progress";p.updatedAt=new Date().toISOString();if(surveyId[...]
+function migrateDuplicateWeeklyProjects(){db.projects=(db.projects||[]).map(normalizeProjectRecord);const canonicalByKey=new Map(),idMap=new Map(),merged=[];for(const project of db.projects){const key[...]
+function normalizeIdList(list){const seen=new Set();return (list||[]).filter(x=>x&&x.id&&!seen.has(x.id)&&seen.add(x.id))}
+function normalizeDaily(r){const projectId=r.projectId||"",date=r.date||today(),reportId=r.reportId||legacyReportId(r,date);const inputBy=r.inputBy||r.userInput||r.createdBy||"";return{...r,projectId,[...]
+function legacyReportId(r,date){const ymd=(date||today()).replace(/-/g,"");const suf=String(r.id||"").replace(/[^a-zA-Z0-9]/g,"").slice(-4).toUpperCase();return `DR-${ymd}-${suf.padStart(4,"0")}`}
+function generateDailyReportId(projectId,date,excludeId){const ymd=(date||today()).replace(/-/g,"");const seq=(db.dailyReports||[]).filter(x=>x.projectId===projectId&&x.date===date&&x.id!==excludeId).[...]
+function normalizeItemName(name){return String(name||"").trim().replace(/\s+/g," ").toLowerCase()}
+function normalizeMaterialItem(m,ctx){return{id:m.id||uid("mat"),name:m.name||"",qty:m.qty??"",unit:m.unit||m.satuan||"",supplier:m.supplier||"",note:m.note||m.keterangan||"",date:m.date||ctx?.date||t[...]
+function normalizeEquipmentItem(e,ctx){return{id:e.id||uid("eq"),name:e.name||"",qty:e.qty??"",unit:e.unit||"",status:e.status||"Milik Sendiri",note:e.note||"",date:e.date||ctx?.date||today(),projectI[...]
+function materialsOf(r){return Array.isArray(r?.materials)?r.materials:[]}
+function equipmentsOf(r){return Array.isArray(r?.equipments)?r.equipments:[]}
+const ID_ONES={"nol":0,"satu":1,"dua":2,"tiga":3,"empat":4,"lima":5,"enam":6,"tujuh":7,"delapan":8,"sembilan":9};
+const VOICE_KNOWN_UNITS=["sak","zak","kg","kilogram","gram","ton","kubik","m3","meter","m","m2","liter","batang","buah","unit","dus","karung","karton","drum","roll","lembar","set","pcs","biji","kaleng[...]
+function parseIndoNumberSequence(tokens,start){let i=start,total=0,current=0,matched=false;while(i<tokens.length){const t=tokens[i];if(t==="seratus"){current+=100;matched=true;i++;continue}if(t==="sep[...]
+function capitalizeWords(s){return s.replace(/\b\w/g,c=>c.toUpperCase())}
+const VOICE_FILLER_WORDS=["kira kira","kira-kira","kayaknya","sekitarnya","sekitar","tadi","kita","masukin","udah","sudah","nih","yah","gitu","deh","sih","kemarin","hari ini","kali ini","barusan","hab[...]
+function stripVoiceFillers(text){let t=" "+text.toLowerCase()+" ";VOICE_FILLER_WORDS.forEach(w=>{t=t.split(" "+w+" ").join(" ")});return t.trim().replace(/\s+/g," ")}
+function parseVoiceItemSegment(text){const cleaned=stripVoiceFillers(text);const tokens=cleaned.trim().toLowerCase().replace(/[.]/g,"").split(/\s+/).filter(Boolean);let qty=null,qtyStart=-1,qtyEnd=-1;[...]
+function splitVoiceSegments(transcript){return transcript.split(/,|\bdan\b|\bterus\b|\blalu\b|\bkemudian\b|\bserta\b/gi).map(s=>s.trim()).filter(Boolean)}
+function parseVoiceItems(transcript){const segments=splitVoiceSegments(transcript);const parsed=[],skipped=[];segments.forEach(seg=>{const item=parseVoiceItemSegment(seg);if(item)parsed.push(item);els[...]
+let voiceRecognition=null,voiceFinalTranscript="",voiceTargetKind=null;
+function voiceSupported(){return !!(window.SpeechRecognition||window.webkitSpeechRecognition)}
+function startVoiceFill(kind){if(!voiceSupported()){alert("Fitur suara tidak didukung di browser ini. Gunakan Google Chrome untuk fitur ini.");return}voiceTargetKind=kind;voiceFinalTranscript="";const[...]
+function renderVoiceListeningOverlay(kind){const label=kind==="material"?"material":"peralatan";const el=document.createElement("div");el.className="voice-overlay";el.id="voiceOverlay";el.innerHTML=`<[...]
+function updateVoiceOverlayTranscript(interim){const finalEl=document.getElementById("voiceFinalText"),interimEl=document.getElementById("voiceInterimText");if(finalEl)finalEl.textContent=voiceFinalTr[...]
+function stopVoiceFill(){if(voiceRecognition){try{voiceRecognition.stop()}catch(e){}}const kind=voiceTargetKind;const transcript=voiceFinalTranscript.trim();removeVoiceOverlay();if(!transcript){alert([...]
+function closeVoiceOverlay(){if(voiceRecognition){try{voiceRecognition.stop()}catch(e){}}removeVoiceOverlay()}
+function removeVoiceOverlay(){const el=document.getElementById("voiceOverlay");if(el)el.remove()}
+function showVoiceReviewScreen(kind,parsed,skipped,rawTranscript){const label=kind==="material"?"Material":"Peralatan";const el=document.createElement("div");el.className="voice-overlay";el.id="voiceO[...]
+function applyVoiceReview(kind,count){const r=ensureDailyDraft();if(!r)return;captureLiveDailyFields(r);const newItems=[];for(let i=0;i<count;i++){const checkEl=document.querySelector(`[data-voice-che[...]
+function weatherOf(r){return Array.isArray(r?.documentationMeta?.weatherEntries)?r.documentationMeta.weatherEntries:[]}
+function formatQty(n){return new Intl.NumberFormat("id-ID",{maximumFractionDigits:2}).format(Number(n)||0)}
+function generateWeeklyMaterialSummary(dailyReports){const map=new Map();(dailyReports||[]).forEach(r=>{materialsOf(r).forEach(m=>{const key=normalizeItemName(m.name);if(!key)return;if(!map.has(key))m[...]
+function generateWeeklyEquipmentSummary(dailyReports){const map=new Map();(dailyReports||[]).forEach(r=>{equipmentsOf(r).forEach(e=>{const key=normalizeItemName(e.name);if(!key)return;if(!map.has(key)[...]
+function normalizeWeekly(w){return{...w,projectId:w.projectId||"",periodStart:w.periodStart||w.startDate||today(),periodEnd:w.periodEnd||w.endDate||today(),weekLabel:w.weekLabel||`Weekly ${fmtDate(w.s[...]
+function load(){try{const raw=localStorage.getItem(KEY);if(raw)db=JSON.parse(raw)}catch(e){console.warn("Load gagal",e)}db.projects=normalizeIdList(db.projects||[]).map(normalizeProjectRecord);db.surv[...]
+function save(updateStatus=true){db.appVersion=APP_VERSION;try{localStorage.setItem(KEY,JSON.stringify(db))}catch(e){console.warn("Gagal menyimpan ke local storage",e);lastSavedText="Gagal menyimpan o[...]
+function getProjectById(projectId){return db.projects.find(p=>p.id===projectId)||null}
+function getSurveyById(surveyId){return db.surveys.find(s=>s.id===surveyId)||null}
+function getDailyById(id){return db.dailyReports.find(r=>r.id===id)||null}
+function getWeeklyById(id){return db.weeklyReports.find(w=>w.id===id)||null}
+function getDailyReportsByProjectAndPeriod(projectId,startDate,endDate){if(!getProjectById(projectId))return[];return db.dailyReports.filter(r=>r.projectId===projectId&&(!startDate||r.date>=startDate)[...]
+function weeklyReportsForProject(projectId){return db.weeklyReports.filter(w=>w.projectId===projectId).sort((a,b)=>String(b.generatedAt).localeCompare(String(a.generatedAt)))}
+function photosOf(r){return Array.isArray(r?.photos)?r.photos:[]}
+function projectSelectorHTML(value=activeProjectId,required=true){return `<select class="select" name="projectId" ${required?"required":""} onchange="activeProjectId=this.value;render()"><option value[...]
+function surveyDisplayName(id){const s=getSurveyById(id);return s?`${s.title||"Survey"} - ${fmtDate(s.surveyDate)}`:"-"}
+function dailyDisplayName(r){return r?`${fmtDate(r.date)} - ${getProjectById(r.projectId)?.name||"Project"}`:"Daily Report"}
+function render(){const views={survey:viewSurvey,daily:viewDaily,weekly:viewWeekly,projects:viewProjects,dailyPreview:viewDailyPreview,weeklyPreview:viewWeeklyPreview};$("#app").innerHTML=shell((views[...]
+function renderHeaderStatus(){const n=$("#saveStatus");if(n)n.textContent=lastSavedText}
+function shell(content){const p=getProjectById(activeProjectId);return `<header class="top no-print"><div class="top-inner"><div class="brand"><div class="mark"><img src="${DEFAULT_LOGO_URL}" alt="STK[...]
+function projectSummary(p){return `<div class="snapshot"><div class="snap"><small>Lokasi</small><strong>${esc(p.location||"-")}</strong></div><div class="snap"><small>Owner</small><strong>${esc(p.owne[...]
+function viewProjects(){const p=getProjectById(activeProjectId)||{};return `<section><div class="toolbar"><div class="title"><h1>Data Proyek</h1><p>Satu data proyek dipakai bersama oleh Survey, Daily [...]
+function saveProject(fd){const explicitId=fd.get("id");const data={id:explicitId||uid("project"),name:String(fd.get("name")||"").trim(),location:fd.get("location")||"",owner:fd.get("owner")||"",estima[...]
+function deleteProject(projectId){const p=getProjectById(projectId);if(!p)return;if(!confirm(`Delete data proyek "${p.name}" beserta Daily/Weekly terkait?`))return;db.projects=db.projects.filter(x=>x.[...]
+function viewSurvey(){const s=activeSurveyId?getSurveyById(activeSurveyId):null;return `<section><div class="toolbar"><div class="title"><h1>Survey Proyek</h1><p>Survey yang memiliki nama proyek akan [...]
+function convertSurveyBox(s){return `<div class="card pad" style="margin-top:14px"><h2 style="margin-top:0">Masukkan ke Daily Progress</h2><p class="muted">Pilih proyek yang sudah terdaftar. Aksi ini [...]
+async function saveSurvey(fd){const id=fd.get("id")||uid("survey");let s=getSurveyById(id);const existingPhotos=s?.photos||[];const newPhotos=[];for(const file of fd.getAll("photos")){if(file&&file.si[...]
+function createProjectFromSurvey(surveyId){const s=getSurveyById(surveyId);if(!s)return alert("Survey tidak ditemukan.");const p=ensureProjectFromSurvey(s);linkSurveyToProject(s.id,p.id);activeProject[...]
+function convertSurveyToDailyReport(surveyId,projectId){const s=getSurveyById(surveyId),p=getProjectById(projectId);if(!s)return alert("Survey tidak ditemukan.");if(!p)return alert("Pilih proyek terda[...]
+function viewDaily(){const p=getProjectById(activeProjectId),r=editingDailyId?getDailyById(editingDailyId):db.dailyReports.find(x=>x.projectId===activeProjectId&&x.date===activeDate);return `<section>[...]
+function blankDaily(){return{id:"",reportId:"",inputBy:"",projectId:activeProjectId,date:activeDate,sourceSurveyId:null,progress:"",notes:"",kendala:"",followUp:"",documentationMeta:{weather:"",workHo[...]
+function dailyForm(r){return `<form class="form" id="dailyForm"><input type="hidden" name="id" value="${esc(r.id)}"><input type="hidden" name="sourceSurveyId" value="${esc(r.sourceSurveyId||"")}"><div[...]
+function materialEditor(r){const items=materialsOf(r);return `<div class="subsection"><div class="subhead"><label>Material Masuk Hari Ini</label><div style="display:flex;gap:6px"><button class="btn sm[...]
+function equipmentEditor(r){const items=equipmentsOf(r),statuses=["Milik Sendiri","Sewa","Subkon"];return `<div class="subsection"><div class="subhead"><label>Peralatan Digunakan Hari Ini</label><div [...]
+function weatherEditor(r){const items=weatherOf(r);return `<div class="subsection"><div class="subhead"><label>Cuaca (bisa lebih dari satu, cth. Pagi/Siang/Sore)</label><button class="btn small" type=[...]
+const ITEM_FIELD_ORDER={material:["name","qty","unit","supplier","note"],equipment:["name","qty","unit","status","note"],weather:["label","condition"]};
+const ITEM_ADD_FN={material:()=>addMaterialRow(),equipment:()=>addEquipmentRow(),weather:()=>addWeatherRow()};
+function handleItemFieldKey(e,el){if(e.key!=="Enter")return;e.preventDefault();let kind=null,field=null;if(el.dataset.materialField!==undefined){kind="material";field=el.dataset.materialField}else if([...]
+function addWeatherRow(){const r=ensureDailyDraft();if(!r)return;captureLiveDailyFields(r);r.documentationMeta=r.documentationMeta||{};r.documentationMeta.weatherEntries=[...weatherOf(r),{id:uid("wthr[...]
+function removeWeatherRow(id){const r=currentDailyRecord();if(!r)return;captureLiveDailyFields(r);r.documentationMeta=r.documentationMeta||{};r.documentationMeta.weatherEntries=weatherOf(r).filter(w=>[...]
+function captureWeatherRows(list){$$("[data-weather-field]").forEach(el=>{const row=list.find(w=>w.id===el.dataset.weatherId);if(row)row[el.dataset.weatherField]=el.value})}
+function autosaveDailyDraft(){const form=document.getElementById("dailyForm");if(!form)return;const r=ensureDailyDraft();if(!r)return;const fd=new FormData(form);r.progress=fd.get("progress")||"";r.no[...]
+function ensureDailyDraft(){let r=editingDailyId?getDailyById(editingDailyId):db.dailyReports.find(x=>x.projectId===activeProjectId&&x.date===activeDate);if(!r){if(!getProjectById(activeProjectId)){al[...]
+function currentDailyRecord(){return editingDailyId?getDailyById(editingDailyId):db.dailyReports.find(x=>x.projectId===activeProjectId&&x.date===activeDate)}
+function captureMaterialRows(list){$$("[data-material-field]").forEach(el=>{const row=list.find(m=>m.id===el.dataset.materialId);if(row)row[el.dataset.materialField]=el.value})}
+function captureEquipmentRows(list){$$("[data-equipment-field]").forEach(el=>{const row=list.find(x=>x.id===el.dataset.equipmentId);if(row)row[el.dataset.equipmentField]=el.value})}
+function captureLiveDailyFields(r){if(!r)return;const form=document.getElementById("dailyForm");if(form){const fd=new FormData(form);if(fd.has("progress"))r.progress=fd.get("progress");if(fd.has("note[...]
+function addMaterialRow(){const r=ensureDailyDraft();if(!r)return;captureLiveDailyFields(r);r.materials=[...materialsOf(r),{id:uid("mat"),name:"",qty:"",unit:"",supplier:"",note:""}];save();render();f[...]
+function removeMaterial(id){const r=currentDailyRecord();if(!r)return;captureLiveDailyFields(r);r.materials=materialsOf(r).filter(m=>m.id!==id);save();render()}
+function addEquipmentRow(){const r=ensureDailyDraft();if(!r)return;captureLiveDailyFields(r);r.equipments=[...equipmentsOf(r),{id:uid("eq"),name:"",qty:"",unit:"",status:"Milik Sendiri",note:""}];save[...]
+function focusLastField(selector){requestAnimationFrame(()=>{const list=$$(selector);const el=list[list.length-1];if(!el)return;el.focus();if(typeof el.value==="string"&&el.setSelectionRange){try{el.s[...]
+function removeEquipment(id){const r=currentDailyRecord();if(!r)return;captureLiveDailyFields(r);r.equipments=equipmentsOf(r).filter(e=>e.id!==id);save();render()}
+function photoEditor(r){const photos=photosOf(r);return `<div class="photo-grid">${photos.map(ph=>`<article class="photo-card"><img src="${ph.url}" alt=""><div class="body"><textarea class="textarea" [...]
+function dailyList(projectId){const items=getDailyReportsByProjectAndPeriod(projectId),p=getProjectById(projectId);return `<h2 style="margin-top:0">Daily Report Proyek</h2><div class="list">${items.ma[...]
+async function saveDailyReport(fd){const projectId=activeProjectId;if(!getProjectById(projectId)){alert("Daily Report wajib memilih existing project.");return}const id=fd.get("id")||editingDailyId||ui[...]
+function capturePhotoCaptions(list){$$("[data-photo-caption]").forEach(el=>{const ph=list.find(p=>p.id===el.dataset.photoCaption);if(ph)ph.caption=el.value});$$("[data-photo-location]").forEach(el=>{c[...]
+function editDailyReport(id){const r=getDailyById(id);if(!r)return;activeProjectId=r.projectId;editingDailyId=id;activeDate=r.date;route="daily";render()}
+async function ensurePhotoOrientations(r){if(!r)return;const missing=photosOf(r).filter(p=>!p.orientation&&p.url);if(!missing.length)return;for(const p of missing){p.orientation=await getImageOrientat[...]
+async function openDailyReport(id){const r=getDailyById(id);if(!r)return;await ensurePhotoOrientations(r);activeProjectId=r.projectId;previewDailyId=id;route="dailyPreview";render()}
+function deleteDailyReport(id){if(!confirm("Hapus Daily Report ini?"))return;db.dailyReports=db.dailyReports.filter(r=>r.id!==id);db.weeklyReports.forEach(w=>{w.sourceDailyReportIds=(w.sourceDailyRepo[...]
+function removePhoto(id){const r=editingDailyId?getDailyById(editingDailyId):db.dailyReports.find(x=>x.projectId===activeProjectId&&x.date===activeDate);if(!r)return;captureLiveDailyFields(r);r.photos[...]
+function previewActiveDaily(){const r=editingDailyId?getDailyById(editingDailyId):db.dailyReports.find(x=>x.projectId===activeProjectId&&x.date===activeDate);if(!r)return alert("Simpan Daily Report du[...]
+function viewDailyPreview(){const r=getDailyById(previewDailyId);if(!r)return `<div class="empty"><h3>Daily tidak ditemukan</h3></div>`;const p=getProjectById(r.projectId);return `<section><div class=[...]
+function reportCoverPage(kind,title,p,boxes,date){return `<section class="paper cover"><div><img class="cover-logo" src="${DEFAULT_LOGO_URL}" alt="STK Logo"><h1 class="cover-title">${esc(title)}</h1><[...]
+function groupPhotosForPdf(photos){const groups=[];let i=0;while(i<photos.length){const isLandscape=photos[i]?.orientation==="landscape";const cap=isLandscape?2:4;const items=[];while(items.length<cap[...]
+function weatherSummaryText(r){const entries=weatherOf(r);if(!entries.length)return "-";return entries.map(w=>w.label?`${w.label}: ${w.condition||"-"}`:w.condition||"-").join(", ")}
+function dailyPdfPages(r,p){const photos=photosOf(r),groups=groupPhotosForPdf(photos);const cover=reportCoverPage("Daily Report","Daily Report",p,[{label:"Report ID",value:r.reportId||"-"},{label:"Tan[...]
+function materialRowHtml(m,i){return `<tr><td>${i+1}</td><td>${esc(m.name||"-")}</td><td>${esc(formatQty(m.qty))}</td><td>${esc(m.unit||"-")}</td><td>${esc(m.supplier||"-")}</td><td>${esc(m.note||"-")[...]
+function materialTableHead(){return `<tr><th style="width:6%">No</th><th>Material</th><th style="width:10%">Qty</th><th style="width:12%">Satuan</th><th style="width:20%">Supplier</th><th>Keterangan</[...]
+function materialTableHtml(r,titleSuffix=""){const items=materialsOf(r);return `<div class="pdf-section" id="materialSection"><h3>Material Masuk Hari Ini${titleSuffix}</h3><table class="daily-table"><[...]
+function equipmentRowHtml(e,i){return `<tr><td>${i+1}</td><td>${esc(e.name||"-")}</td><td>${esc(formatQty(e.qty))}</td><td>${esc(e.unit||"-")}</td><td>${esc(e.status||"-")}</td><td>${esc(e.note||"-")}[...]
+function equipmentTableHead(){return `<tr><th style="width:6%">No</th><th>Peralatan</th><th style="width:10%">Qty</th><th style="width:12%">Satuan</th><th style="width:16%">Status</th><th>Keterangan</[...]
+function equipmentTableHtml(r,titleSuffix=""){const items=equipmentsOf(r);return `<div class="pdf-section" id="equipmentSection"><h3>Peralatan Digunakan Hari Ini${titleSuffix}</h3><table class="daily-[...]
+function dailyPhotoPage(g,r,p,pageNum,totalPages,orientation="portrait"){return `<section class="paper dphoto-page">${dailyPhotoHeader(r,p,pageNum,totalPages)}<div class="dphoto-table${orientation==="[...]
+function dailyPhotoHeader(r,p,pageNum,totalPages){return `<div class="dphoto-header"><div class="dphoto-logo"><img src="${DEFAULT_LOGO_URL}" alt="Logo"></div><div class="dphoto-title"><h1>Laporan Foto[...]
+function dailyPhotoFooter(p,pageNum){return `<div class="dphoto-footer"><span>PT. Solusi Teknologi Konstruksi</span><span>Dicetak: ${fmtDateTime(new Date().toISOString())}</span><span>Halaman ${pageNu[...]
+function dailyPhotoCard(ph,area){if(!ph)return `<div class="dphoto-card is-empty"></div>`;return `<div class="dphoto-card"><div class="dphoto-photo"><img src="${ph.url}" alt="Foto ${ph.number||""}"></[...]
+function repaginateDailyDetail(){try{const detail=document.getElementById("dailyDetailPage"),headEl=document.getElementById("dailyDetailHead"),matSection=document.getElementById("materialSection"),eqS[...]
+function viewWeekly(){const p=getProjectById(activeProjectId),start=$("#periodStart")?.value||startOfWeek(activeDate),end=$("#periodEnd")?.value||activeDate,dailies=p?getDailyReportsByProjectAndPeriod[...]
+function weeklySummaryPreview(dailies){const s=generateWeeklySummaryFromDailyReports(dailies);return `<div class="pdf-section" style="margin-top:0"><h3>Preview Ringkasan</h3><p>${esc(s.autoSummary)}</[...]
+function generateWeeklySummaryFromDailyReports(dailyReports){const map=(key)=>dailyReports.map(r=>({id:r.id,date:r.date,text:String(r[key]||"").trim()})).filter(x=>x.text);const progressItems=map("pro[...]
+async function saveWeeklyReport(projectId,periodStart,periodEnd,summaryData,progressFile=null){if(!getProjectById(projectId)){alert("Proyek tidak valid. Weekly tidak dibuat.");return null}if(!periodSt[...]
+function renderWeeklyReportsForProject(projectId){const p=getProjectById(projectId),items=p?weeklyReportsForProject(projectId):[];return `<h2 style="margin-top:0">Weekly Reports ${p?`- ${esc(p.name)}`[...]
+function viewWeeklyPreview(){const w=getWeeklyById(previewWeeklyId);if(!w)return `<div class="empty"><h3>Weekly Report tidak ditemukan</h3></div>`;setTimeout(()=>ensureWeeklyPdfRendered(w.id),0);retur[...]
+function weeklyPdfPages(w){const p=getProjectById(w.projectId),s=w.summaryData||generateWeeklySummaryFromDailyReports((w.sourceDailyReportIds||[]).map(getDailyById).filter(Boolean)),photos=s.photos||[[...]
+function materialSummaryPage(s,p,w){const rows=s.materialSummary||[];return `<section class="paper"><h2>Rekap Material Mingguan</h2><table class="daily-table"><thead><tr><th style="width:6%">No</th><t[...]
+function equipmentSummaryPage(s,p,w){const rows=s.equipmentSummary||[];return `<section class="paper"><h2>Rekap Peralatan Mingguan</h2><table class="daily-table"><thead><tr><th style="width:6%">No</th[...]
+function splitText(v,max=760){const s=String(v||"-").trim()||"-";if(s.length<=max)return[s];const parts=[];let rest=s;while(rest.length>max){let cut=rest.lastIndexOf("\n",max);if(cut<max*.45)cut=rest.[...]
+function weeklySummaryPages(w,s,p){const cards=[{title:"Progress Mingguan",html:`${summaryList("Progress Summary",s.progressItems)}${summaryList("Notes",s.notesItems)}`},{title:"Summary Mingguan",text[...]
+function dailyTablePage(w,s){const ds=s.dailySnapshots||[];return `<section class="paper"><h2>Daily Reports Source</h2><table class="daily-table"><thead><tr><th>Daily Report</th><th>Progress</th><th>K[...]
+function section(title,text){return `<div class="pdf-section"><h3>${esc(title)}</h3><p>${esc(text||"-")}</p></div>`}
+function summaryList(title,items=[]){if(!items.length)return section(title,"-");return `<div class="pdf-section"><h3>${esc(title)}</h3><ul>${items.map(x=>`<li><b>${fmtDate(x.date)}:</b> ${esc(x.text)}[...]
+function photoBlock(ph,date,area){if(!ph)return `<article class="photo-block" style="visibility:hidden"><div></div><div></div></article>`;return `<article class="photo-block"><div class="photo-frame">[...]
+function attachmentReportPages(w){const a=w.progressAttachment,p=getProjectById(w.projectId);if(!a)return"";if(a.renderedPages?.length)return a.renderedPages.map((src,i)=>`<section class="paper pdf-at[...]
+function attachmentPreview(a){if(a.renderStatus==="rendering")return `<div class="attachment-box"><strong>Menyiapkan lampiran PDF...</strong><p>PDF sedang dirender menjadi gambar agar ikut tampil di e[...]
+function dataUrlToBytes(dataUrl){const raw=atob(String(dataUrl||"").split(",")[1]||""),bytes=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);return bytes}
+function loadPdfJs(){if(window.pdfjsLib)return Promise.resolve(window.pdfjsLib);return new Promise((res,rej)=>{const existing=document.querySelector('script[data-pdfjs]');if(existing){existing.addEven[...]
+async function renderPdfDataUrlToImages(dataUrl){const pdfjs=await loadPdfJs();const doc=await pdfjs.getDocument({data:dataUrlToBytes(dataUrl),disableWorker:true}).promise;const pages=[];for(let i=1;i[...]
+async function ensureWeeklyPdfRendered(id){const w=getWeeklyById(id),a=w?.progressAttachment;if(!a||!String(a.type||"").includes("pdf")||a.renderedPages?.length||pdfRenderJobs.has(id))return;pdfRender[...]
+function footerHtml(projectName,date){return `<footer class="pdf-footer"><span>PT. Solusi Teknologi Konstruksi</span><span>${esc(projectName||"Report")}</span><span>${fmtDate(date)}</span></footer>`}
+function exportDailyPDF(id){const r=getDailyById(id),old=document.title;document.title=`Daily - ${cleanFile(getProjectById(r?.projectId)?.name)} - ${r?.date||today()}`;window.onafterprint=()=>{documen[...]
+function generateWeeklyPdf(weeklyReportId){const w=getWeeklyById(weeklyReportId);if(w?.progressAttachment&&String(w.progressAttachment.type||"").includes("pdf")&&!w.progressAttachment.renderedPages?.l[...]
+function deleteWeekly(id){if(!confirm("Hapus Weekly Report ini?"))return;db.weeklyReports=db.weeklyReports.filter(w=>w.id!==id);save();render()}
+function bindForms(){const projectForm=$("#projectForm");if(projectForm)projectForm.onsubmit=e=>{e.preventDefault();saveProject(new FormData(projectForm))};const surveyForm=$("#surveyForm");if(surveyF[...]
+function backupJSON(){const payload={appVersion:APP_VERSION,projects:db.projects,surveys:db.surveys,dailyReports:db.dailyReports,weeklyReports:db.weeklyReports,exportedAt:new Date().toISOString()};con[...]
+async function restoreJSON(file){if(!file)return;try{const incoming=JSON.parse(await file.text());if(!confirm("Restore akan mengganti semua data lokal report di browser ini. Lanjut?"))return;db={appVe[...]
+function getImageOrientation(url){return new Promise(resolve=>{const img=new Image();img.onload=()=>resolve(img.naturalWidth>img.naturalHeight?"landscape":"portrait");img.onerror=()=>resolve("portrait[...]
+function imageToData(file,max=1200,q=.78){return new Promise((res,rej)=>{const r=new FileReader();r.onerror=rej;r.onload=()=>{const im=new Image();im.onerror=rej;im.onload=()=>{const s=Math.min(1,max/[...]
+function fileToData(file){return new Promise((res,rej)=>{const r=new FileReader();r.onerror=rej;r.onload=()=>res(String(r.result||""));r.readAsDataURL(file)})}
+window.addEventListener("error",e=>console.warn("App error",e.message));
+load();render();
 </script>
 </body>
 </html>
